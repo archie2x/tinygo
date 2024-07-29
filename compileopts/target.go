@@ -30,6 +30,7 @@ type TargetSpec struct {
 	Features         string   `json:"features,omitempty"`
 	GOOS             string   `json:"goos,omitempty"`
 	GOARCH           string   `json:"goarch,omitempty"`
+	SoftFloat        bool     // used for non-baremetal systems (GOMIPS=softfloat etc)
 	BuildTags        []string `json:"build-tags,omitempty"`
 	GC               string   `json:"gc,omitempty"`
 	Scheduler        string   `json:"scheduler,omitempty"`
@@ -84,6 +85,10 @@ func (spec *TargetSpec) overrideProperties(child *TargetSpec) error {
 			}
 		case reflect.Uint, reflect.Uint32, reflect.Uint64: // for Uint, copy if not zero
 			if src.Uint() != 0 {
+				dst.Set(src)
+			}
+		case reflect.Bool:
+			if src.Bool() {
 				dst.Set(src)
 			}
 		case reflect.Ptr: // for pointers, copy if not nil
@@ -228,7 +233,7 @@ func LoadTarget(options *Options) (*TargetSpec, error) {
 		} else if options.GOARCH == "arm" {
 			target += "-gnueabihf"
 		}
-		return defaultTarget(options.GOOS, options.GOARCH, target)
+		return defaultTarget(options, target)
 	}
 
 	// See whether there is a target specification for this target (e.g.
@@ -289,14 +294,14 @@ func GetTargetSpecs() (map[string]*TargetSpec, error) {
 	return maps, nil
 }
 
-func defaultTarget(goos, goarch, triple string) (*TargetSpec, error) {
+func defaultTarget(options *Options, triple string) (*TargetSpec, error) {
 	// No target spec available. Use the default one, useful on most systems
 	// with a regular OS.
 	spec := TargetSpec{
 		Triple:           triple,
-		GOOS:             goos,
-		GOARCH:           goarch,
-		BuildTags:        []string{goos, goarch},
+		GOOS:             options.GOOS,
+		GOARCH:           options.GOARCH,
+		BuildTags:        []string{options.GOOS, options.GOARCH},
 		GC:               "precise",
 		Scheduler:        "tasks",
 		Linker:           "cc",
@@ -304,7 +309,7 @@ func defaultTarget(goos, goarch, triple string) (*TargetSpec, error) {
 		GDB:              []string{"gdb"},
 		PortReset:        "false",
 	}
-	switch goarch {
+	switch options.GOARCH {
 	case "386":
 		spec.CPU = "pentium4"
 		spec.Features = "+cmov,+cx8,+fxsr,+mmx,+sse,+sse2,+x87"
@@ -324,17 +329,26 @@ func defaultTarget(goos, goarch, triple string) (*TargetSpec, error) {
 		}
 	case "arm64":
 		spec.CPU = "generic"
-		if goos == "darwin" {
+		if options.GOOS == "darwin" {
 			spec.Features = "+fp-armv8,+neon"
-		} else if goos == "windows" {
+		} else if options.GOOS == "windows" {
 			spec.Features = "+fp-armv8,+neon,-fmv"
 		} else { // linux
 			spec.Features = "+fp-armv8,+neon,-fmv,-outline-atomics"
 		}
 	case "mips", "mipsle":
 		spec.CPU = "mips32r2"
-		spec.Features = "+fpxx,+mips32r2,+nooddspreg,-noabicalls"
 		spec.CFlags = append(spec.CFlags, "-fno-pic")
+		switch options.GOMIPS {
+		case "hardfloat":
+			spec.Features = "+fpxx,+mips32r2,+nooddspreg,-noabicalls"
+		case "softfloat":
+			spec.SoftFloat = true
+			spec.Features = "+mips32r2,+soft-float,-noabicalls"
+			spec.CFlags = append(spec.CFlags, "-msoft-float")
+		default:
+			return nil, errors.New("invalid GOMIPS: must be hardfloat or softfloat")
+		}
 	case "wasm":
 		spec.CPU = "generic"
 		spec.Features = "+bulk-memory,+mutable-globals,+nontrapping-fptoint,+sign-ext"
@@ -345,7 +359,7 @@ func defaultTarget(goos, goarch, triple string) (*TargetSpec, error) {
 			"-msign-ext",
 		)
 	}
-	if goos == "darwin" {
+	if options.GOOS == "darwin" {
 		spec.Linker = "ld.lld"
 		spec.Libc = "darwin-libSystem"
 		arch := strings.Split(triple, "-")[0]
@@ -356,12 +370,12 @@ func defaultTarget(goos, goarch, triple string) (*TargetSpec, error) {
 			"-arch", arch,
 			"-platform_version", "macos", platformVersion, platformVersion,
 		)
-	} else if goos == "linux" {
+	} else if options.GOOS == "linux" {
 		spec.Linker = "ld.lld"
 		spec.RTLib = "compiler-rt"
 		spec.Libc = "musl"
 		spec.LDFlags = append(spec.LDFlags, "--gc-sections")
-		if goarch == "arm64" {
+		if options.GOARCH == "arm64" {
 			// Disable outline atomics. For details, see:
 			// https://cpufun.substack.com/p/atomics-in-aarch64
 			// A better way would be to fully support outline atomics, which
@@ -375,7 +389,7 @@ func defaultTarget(goos, goarch, triple string) (*TargetSpec, error) {
 			// proper threading.
 			spec.CFlags = append(spec.CFlags, "-mno-outline-atomics")
 		}
-	} else if goos == "windows" {
+	} else if options.GOOS == "windows" {
 		spec.Linker = "ld.lld"
 		spec.Libc = "mingw-w64"
 		// Note: using a medium code model, low image base and no ASLR
@@ -384,7 +398,7 @@ func defaultTarget(goos, goarch, triple string) (*TargetSpec, error) {
 		// normally present in Go (without explicitly opting in).
 		// For more discussion:
 		// https://groups.google.com/g/Golang-nuts/c/Jd9tlNc6jUE/m/Zo-7zIP_m3MJ?pli=1
-		switch goarch {
+		switch options.GOARCH {
 		case "amd64":
 			spec.LDFlags = append(spec.LDFlags,
 				"-m", "i386pep",
@@ -401,7 +415,7 @@ func defaultTarget(goos, goarch, triple string) (*TargetSpec, error) {
 			"--no-insert-timestamp",
 			"--no-dynamicbase",
 		)
-	} else if goos == "wasip1" {
+	} else if options.GOOS == "wasip1" {
 		spec.GC = "" // use default GC
 		spec.Scheduler = "asyncify"
 		spec.Linker = "wasm-ld"
@@ -420,25 +434,25 @@ func defaultTarget(goos, goarch, triple string) (*TargetSpec, error) {
 	} else {
 		spec.LDFlags = append(spec.LDFlags, "-no-pie", "-Wl,--gc-sections") // WARNING: clang < 5.0 requires -nopie
 	}
-	if goarch != "wasm" {
+	if options.GOARCH != "wasm" {
 		suffix := ""
-		if goos == "windows" && goarch == "amd64" {
+		if options.GOOS == "windows" && options.GOARCH == "amd64" {
 			// Windows uses a different calling convention on amd64 from other
 			// operating systems so we need separate assembly files.
 			suffix = "_windows"
 		}
-		asmGoarch := goarch
-		if goarch == "mips" || goarch == "mipsle" {
+		asmGoarch := options.GOARCH
+		if options.GOARCH == "mips" || options.GOARCH == "mipsle" {
 			asmGoarch = "mipsx"
 		}
 		spec.ExtraFiles = append(spec.ExtraFiles, "src/runtime/asm_"+asmGoarch+suffix+".S")
 		spec.ExtraFiles = append(spec.ExtraFiles, "src/internal/task/task_stack_"+asmGoarch+suffix+".S")
 	}
-	if goarch != runtime.GOARCH {
+	if options.GOARCH != runtime.GOARCH {
 		// Some educated guesses as to how to invoke helper programs.
 		spec.GDB = []string{"gdb-multiarch"}
-		if goos == "linux" {
-			switch goarch {
+		if options.GOOS == "linux" {
+			switch options.GOARCH {
 			case "386":
 				// amd64 can _usually_ run 32-bit programs, so skip the emulator in that case.
 				if runtime.GOARCH != "amd64" {
@@ -457,8 +471,8 @@ func defaultTarget(goos, goarch, triple string) (*TargetSpec, error) {
 			}
 		}
 	}
-	if goos != runtime.GOOS {
-		if goos == "windows" {
+	if options.GOOS != runtime.GOOS {
+		if options.GOOS == "windows" {
 			spec.Emulator = "wine {}"
 		}
 	}

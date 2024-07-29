@@ -184,6 +184,9 @@ func (l *Library) load(config *compileopts.Config, tmpdir string) (job *compileJ
 	}
 	if strings.HasPrefix(target, "mips") {
 		args = append(args, "-fno-pic")
+		if config.Target.SoftFloat {
+			args = append(args, "-msoft-float")
+		}
 	}
 
 	var once sync.Once

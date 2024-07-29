@@ -128,6 +128,13 @@ func Get(name string) string {
 		// difference between ARMv6 and ARMv7. ARMv6 binaries are much smaller,
 		// especially when floating point instructions are involved.
 		return "6"
+	case "GOMIPS":
+		gomips := os.Getenv("GOMIPS")
+		if gomips == "" {
+			// Default to hardfloat (this matches the Go toolchain).
+			gomips = "hardfloat"
+		}
+		return gomips
 	case "GOROOT":
 		readGoEnvVars()
 		return goEnvVars.GOROOT
